@@ -1,0 +1,143 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Paper → EPUB Sync</title>
+<style>
+  :root { --bg:#f6f6f4; --card:#fff; --ink:#1d1d1f; --muted:#6e6e73; --line:#e3e3e0; --accent:#2f6fdb; --ok:#1f9d55; --warn:#c2410c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#151517; --card:#1f1f22; --ink:#ececee; --muted:#9a9aa1; --line:#33333a; --accent:#6aa0ff; --ok:#3ecf7a; --warn:#fb923c; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:16px/1.5 -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", sans-serif; }
+  main { max-width:560px; margin:0 auto; padding:20px 16px calc(32px + env(safe-area-inset-bottom)); }
+  h1 { font-size:19px; margin:4px 0 14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; margin-bottom:12px; }
+  .title { font-size:18px; font-weight:600; margin:0 0 4px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .big { font-size:28px; font-weight:700; margin:6px 0 2px; }
+  .pick { margin-top:12px; }
+  .pick button { display:block; width:100%; text-align:left; font-weight:400; font-size:15px; margin-top:6px; padding:10px 12px; border-left:3px solid var(--line); }
+  .pick button.on { border-color:var(--accent); border-left-width:3px; background:color-mix(in srgb, var(--accent) 10%, var(--card)); font-weight:600; }
+  .warn { color:var(--warn); font-size:14px; margin-top:8px; }
+  .ok { color:var(--ok); }
+  .row { display:flex; gap:10px; margin-top:14px; }
+  button { flex:1; font:inherit; font-weight:600; padding:13px 10px; border-radius:12px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
+  button.primary { background:var(--accent); border-color:var(--accent); color:#fff; }
+  button:disabled { opacity:.5; }
+  textarea { width:100%; min-height:120px; font:inherit; font-size:15px; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
+  ul { list-style:none; padding:0; margin:8px 0 0; }
+  li button { width:100%; text-align:left; font-weight:500; display:flex; justify-content:space-between; gap:8px; margin-top:8px; }
+  .hidden { display:none; }
+</style>
+</head>
+<body>
+<main>
+  <h1>📖 Paper book → EPUB position</h1>
+  <div id="status" class="card muted">Finding the page…</div>
+  <div id="result" class="card hidden"></div>
+  <div id="books" class="card hidden"></div>
+  <div id="manual" class="card hidden">
+    <div class="muted">You can also paste text from a photo of the page.</div>
+    <textarea id="text" placeholder="Text of the printed page"></textarea>
+    <div class="row"><button class="primary" id="find">Find</button></div>
+  </div>
+</main>
+<script>
+const $ = (id) => document.getElementById(id);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) k === "class" ? (e.className = v) : k.startsWith("on") ? (e[k] = v) : e.setAttribute(k, v);
+  for (const k of kids) e.append(k instanceof Node ? k : document.createTextNode(k ?? ""));
+  return e;
+};
+const show = (id, on = true) => $(id).classList.toggle("hidden", !on);
+let pageText = new URLSearchParams(location.search).get("text") || "";
+
+async function api(method, url, body) {
+  const r = await fetch(url, { method, headers: { "Content-Type": "application/json" }, body: body ? JSON.stringify(body) : undefined });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || r.status);
+  return data;
+}
+
+function status(text) { $("status").textContent = text; show("status"); }
+
+async function locate(chapterId) {
+  show("result", false); show("books", false);
+  status(chapterId ? "Searching the chosen book…" : "Searching the books you are reading… (then all EPUBs)");
+  try {
+    const r = await api("POST", "/locate", { text: pageText, chapterId });
+    show("status", false);
+    r.found ? showResult(r) : notFound(r.reason);
+  } catch (e) { status("Bridge error: " + e.message); show("manual"); }
+}
+
+function notFound(reason) {
+  const box = $("result");
+  box.replaceChildren(el("div", { class: "title" }, "Not found"), el("div", { class: "muted" }, reason || ""),
+    el("div", { class: "row" }, el("button", { onclick: pickBook }, "Choose the book and search again")));
+  show("result");
+}
+
+function showResult(r) {
+  const t = r.target, c = r.current;
+  const box = $("result");
+  // the photographed page's paragraphs; the first is preselected, tap the one you stopped at
+  const paras = t.paras && t.paras.length ? t.paras : [{ bookScrollId: t.bookScrollId, percent: t.percent, head: t.head }];
+  let sel = paras[0];
+  const big = el("div", { class: "big" }), warn = el("div", { class: "warn" });
+  const pick = el("div", { class: "pick" }, el("div", { class: "muted" }, "Where did you stop? Reading resumes at that paragraph."));
+  const choose = (p, btn) => {
+    sel = p;
+    for (const b of pick.querySelectorAll("button")) b.classList.toggle("on", b === btn);
+    big.textContent = `${p.percent}%`;
+    warn.textContent = p.percent < c.percent ? "⚠ This is earlier than your current EPUB position." : "";
+  };
+  for (const p of paras) {
+    const btn = el("button", {}, `${p.head || "…"}…`);
+    btn.onclick = () => choose(p, btn);
+    pick.append(btn);
+  }
+  choose(sel, pick.querySelector("button"));
+  const apply = el("button", { class: "primary" }, "Sync");
+  apply.onclick = async () => {
+    apply.disabled = true;
+    try {
+      await api("POST", "/locate/apply", { chapterId: r.book.chapterId, pageNum: t.pageNum, bookScrollId: sel.bookScrollId });
+      box.replaceChildren(el("div", { class: "title ok" }, "✓ Saved to Kavita"),
+        el("div", { class: "muted" }, `${r.book.title} at ${sel.percent}%. Your reader will offer to jump there when you open the book.`));
+    } catch (e) { apply.disabled = false; status("Saving failed: " + e.message); }
+  };
+  box.replaceChildren(
+    el("div", { class: "title" }, r.book.title),
+    el("div", { class: "muted" }, t.section || ""),
+    big,
+    el("div", { class: "muted" }, `Current EPUB progress ${c.percent}%${r.searched === "all" ? " · found in all EPUBs" : ""} · match ${Math.round(r.score * 100)}%`),
+    warn,
+    pick,
+    el("div", { class: "row" }, el("button", { onclick: () => { box.replaceChildren(el("div", { class: "muted" }, "Cancelled. Nothing was changed.")); } }, "Cancel"), apply),
+    el("div", { class: "row" }, el("button", { onclick: pickBook }, "Wrong book")));
+  show("result");
+}
+
+async function pickBook() {
+  show("result", false);
+  status("Loading the books you are reading…");
+  try {
+    const { books } = await api("GET", "/locate/books");
+    show("status", false);
+    const list = el("ul");
+    for (const b of books) list.append(el("li", {}, el("button", { onclick: () => locate(b.chapterId) }, el("span", {}, b.title), el("span", { class: "muted" }, `${b.percent}%`))));
+    $("books").replaceChildren(el("div", { class: "title" }, "Which book is it?"), books.length ? list : el("div", { class: "muted" }, "No EPUBs in progress."));
+    show("books");
+  } catch (e) { status("Bridge error: " + e.message); }
+}
+
+$("find").onclick = () => { pageText = $("text").value; show("manual", false); locate(); };
+if (pageText) locate(); else { show("status", false); show("manual"); }
+</script>
+</body>
+</html>

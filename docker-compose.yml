@@ -1,0 +1,28 @@
+services:
+  ereader-bridge:
+    build: .
+    container_name: ereader-bridge
+    restart: unless-stopped
+    ports:
+      - "2525:2525"  # SMTP in (Kavita "Send to Device")
+      - "8086:8086"  # HTTP in (PUT /send/<device>/<filename>, GET /status, KOReader pull, /sync)
+    volumes:
+      - ./data:/data
+      # Paper -> EPUB sync only: mount Kavita's library at the SAME paths Kavita sees inside its own container
+      # (the bridge reads the EPUB paths Kavita reports). Remove if you don't use /sync.
+      - /path/to/your/books:/books:ro
+    env_file:
+      - path: .env        # copy .env.example to .env (KAVITA_API_KEY, NOTIFY_URL); not in git
+        required: false
+    environment:
+      - TZ=UTC
+      - SCAN_SUBNET=192.168.1.0/24   # where BOOX devices are searched for when their IP changes
+      - KAVITA_URL=http://host.docker.internal:5000   # paper -> EPUB sync; leave KAVITA_API_KEY empty to disable
+      - NOTIFY_EVENTS=delivered,pulled
+      # Device name = SMTP local-part (<name>@anything) and HTTP path segment.
+      # boox: "host" is a first guess; the device is found again by "id" (from GET http://<boox>:8085/api/device).
+      # moosnap: "host"/"alt_hosts" ARE the identity -> give the device a fixed IP.
+      # Any device running KOReader can also pull its own queue with the plugin in koreader/ (VPN, hotspot...).
+      # alt_hosts: other fixed addresses of the same device, e.g. its WireGuard IP when away from home.
+      - 'DEVICES={"palma":   {"driver": "boox", "id": "aa:bb:cc:dd:ee:ff", "host": "192.168.1.50"},
+                  "moosnap": {"driver": "moosnap", "host": "192.168.1.51", "alt_hosts": ["10.0.0.51"]}}'

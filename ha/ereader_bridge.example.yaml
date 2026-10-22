@@ -1,0 +1,70 @@
+# Optional Home Assistant package: phone notifications from ereader-bridge.
+# Put it in <config>/packages/ (with `homeassistant: packages: !include_dir_named packages`), then replace:
+#   <webhook-id>        any random string; the bridge's NOTIFY_URL is http://<ha>:8123/api/webhook/<webhook-id>
+#   <bridge-host>       the machine running ereader-bridge
+#   notify.mobile_app_<your_phone>
+#
+# The bridge POSTs {"event", "device", "file"} when a file actually lands on a device:
+#   event: delivered (the bridge pushed it) | pulled (the device's KOReader plugin fetched it)
+# Kavita's "Send to" only means the file was queued; this tells you it arrived.
+
+automation:
+  - id: ereader_bridge_delivered
+    alias: "[e-reader] file delivered"
+    mode: queued
+    triggers:
+      - trigger: webhook
+        webhook_id: <webhook-id>
+        allowed_methods:
+          - POST
+        local_only: true
+    actions:
+      - action: notify.mobile_app_<your_phone>
+        data:
+          title: "📚 On your e-reader"
+          message: >-
+            {{ trigger.json.file }} → {{ trigger.json.device }}{{ ' (pulled by the device)' if trigger.json.event == 'pulled' else '' }}
+
+# Health watch: if the bridge stops, files sent from Kavita just pile up in its queue.
+rest:
+  - resource: http://<bridge-host>:8086/health
+    scan_interval: 60
+    timeout: 10
+    binary_sensor:
+      - name: "ereader-bridge"
+        unique_id: ereader_bridge_health
+        device_class: connectivity
+        value_template: "{{ value_json is defined and value_json.ok }}"
+
+automation ereader_bridge_health:
+  - id: ereader_bridge_down
+    alias: "[e-reader] bridge down"
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.ereader_bridge
+        to:
+          - "off"
+          - unavailable
+        for: "00:05:00"
+    actions:
+      - action: notify.mobile_app_<your_phone>
+        data:
+          title: "⚠️ ereader-bridge is down"
+          message: "No response for 5 minutes. Files sent to your e-readers are not being delivered."
+  - id: ereader_bridge_recovered
+    alias: "[e-reader] bridge recovered"
+    triggers:
+      - trigger: state
+        entity_id: binary_sensor.ereader_bridge
+        from:
+          - "off"
+          - unavailable
+        to: "on"
+    conditions:  # only after a real outage (not the unavailable -> on blip when HA restarts)
+      - condition: template
+        value_template: "{{ (trigger.to_state.last_changed - trigger.from_state.last_changed).total_seconds() > 300 }}"
+    actions:
+      - action: notify.mobile_app_<your_phone>
+        data:
+          title: "✅ ereader-bridge is back"
+          message: "Queued files will be delivered when the devices are reachable."
