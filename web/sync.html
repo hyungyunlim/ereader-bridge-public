@@ -160,10 +160,21 @@ async function audioBooks() {
         el("div", { class: "muted" }, `Book ${b.book.percent}% · audiobook ${hms(a.time)} / ${hms(a.duration)} (${Math.round(100 * a.time / a.duration)}%)`),
         el("div", { class: "row" },
           el("button", { onclick: () => audioLocate(b, "book") }, "🎧→📖 Sync book"),
-          el("button", { onclick: () => audioLocate(b, "audio") }, "📖→🎧 Sync audiobook"))));
+          el("button", { onclick: () => audioLocate(b, "audio") }, "📖→🎧 Sync audiobook")),
+        el("div", { class: "row" },
+          el("button", { class: b.auto.on ? "primary" : "", onclick: () => setAuto(b, !b.auto.on) },
+            b.auto.on ? "Auto sync on · turn off" : "Turn on auto sync")),
+        b.auto.on ? el("div", { class: "muted", style: "margin-top:6px" }, b.auto.last
+          ? `Last auto sync: ${new Date(b.auto.last.at * 1000).toLocaleString(undefined, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" })} ${b.auto.last.msg}`
+          : "After 5 minutes without reading or listening, the other side is moved to that position (forward only).") : ""));
     }
     show("audio");
   } catch (e) { status("Bridge error: " + e.message); }
+}
+
+async function setAuto(b, on) {
+  try { await api("POST", "/audio/auto", { chapterId: b.chapterId, itemId: b.audio.itemId, on }); audioBooks(); }
+  catch (e) { status("Error: " + e.message); }
 }
 
 async function audioLocate(b, direction) {

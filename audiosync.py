@@ -8,6 +8,10 @@ within ~1% of the text fraction, and searching just that stretch keeps speech-re
   book -> audio: guess the time from the text position, transcribe there, correct by the character
                  gap at the local pace, repeat until the clip starts at the paragraph.
 Every successful match is kept as an anchor (time, char offset), so later guesses start closer.
+
+Auto mode (per book): poll both positions every minute; once neither has moved for IDLE seconds (a reading
+or listening session ended, short pauses don't count), carry the side that moved last over to the other,
+forward only. Nothing is transcribed while you read or listen, and only once per session after.
 """
 import bisect
 import json
@@ -32,6 +36,13 @@ CLIP_SECONDS = 30
 SPAN = 0.06       # share of the book searched on each side of the expected position
 MIN_SCORE = float(os.environ.get("AUDIOSYNC_MIN_SCORE", "0.3"))  # share of the clip's n-grams found
 CLOSE_ENOUGH = 60  # chars (~15 s of narration) between the clip's start and the target paragraph
+IDLE = float(os.environ.get("AUDIOSYNC_IDLE_SECONDS", "300"))  # auto mode: a side is done after this long unmoved
+AUTO_POLL = 60
+
+
+def hms(s):
+    s = int(round(s))
+    return f"{s // 3600}:{s % 3600 // 60:02d}:{s % 60:02d}"
 
 
 def enabled():
@@ -183,6 +194,11 @@ class AudioSync:
         except (OSError, ValueError):
             self.anchors = {}
         self.lock = threading.Lock()
+        self.auto_file = Path(data_dir) / "audio_auto.json"
+        try:
+            self.auto = json.loads(self.auto_file.read_text())  # chapterId -> auto-mode state
+        except (OSError, ValueError):
+            self.auto = {}
 
     # anchors: (seconds, char offset) pairs per (book, audiobook); the ends of the book are implied
     def _points(self, key, duration, total):
@@ -195,10 +211,17 @@ class AudioSync:
         return o0 + (o1 - o0) * (seconds - t0) / max(1e-6, t1 - t0)
 
     def _expected_time(self, key, offset, duration, total):
+        """(seconds where the narration reaches `offset`, local pace in chars/s)."""
         pts = sorted(self._points(key, duration, total), key=lambda p: p[1])
         i = max(1, min(len(pts) - 1, bisect.bisect_left([p[1] for p in pts], offset)))
         (t0, o0), (t1, o1) = pts[i - 1], pts[i]
-        return t0 + (t1 - t0) * (offset - o0) / max(1, o1 - o0), max(0.5, (o1 - o0) / max(1e-6, t1 - t0))
+        # pace over >= 5 minutes of anchors: each anchor is off by a few dozen chars, so neighbours a minute
+        # apart can give a pace 30% wrong
+        j, k = i - 1, i
+        while pts[k][0] - pts[j][0] < 300 and (j > 0 or k < len(pts) - 1):
+            j, k = max(0, j - 1), min(len(pts) - 1, k + 1)
+        pace = (pts[k][1] - pts[j][1]) / max(1e-6, pts[k][0] - pts[j][0])
+        return t0 + (t1 - t0) * (offset - o0) / max(1, o1 - o0), max(0.5, pace)
 
     def _anchor(self, key, seconds, offset):
         with self.lock:
@@ -242,7 +265,9 @@ class AudioSync:
                 idx = self.ts.index.get(b["path"])
                 page, scroll = self.ts.kavita.progress(b["chapterId"])
                 where = self.ts._where(b, idx, page, scroll)
+                s = self.auto.get(str(b["chapterId"]), {})
                 out.append({"chapterId": b["chapterId"], "title": b["title"], "book": where,
+                            "auto": {"on": bool(s), "last": s.get("last")},
                             "audio": {"itemId": a["id"], "title": a["title"], "duration": a["duration"],
                                       "time": self.abs.progress(a["id"])}})
             except Exception as e:
@@ -296,3 +321,91 @@ class AudioSync:
         item = self.abs.item(item_id)
         self.abs.set_progress(item_id, float(seconds), item["duration"])
         return {"ok": True, "title": item["title"], "time": float(seconds)}
+
+    # ---------------------------------------------------------------- auto mode
+
+    def set_auto(self, chapter_id, item_id, on):
+        """Turn auto mode on/off for a book. Turning it on takes the current positions as already in step."""
+        with self.lock:
+            if on:
+                book, audio, now = list(self.ts.kavita.progress(chapter_id)), self.abs.progress(item_id), time.time()
+                self.auto[str(chapter_id)] = {"itemId": item_id, "book": book, "book_at": now, "audio": audio,
+                                              "audio_at": now, "done_book": book, "done_audio": audio, "last": None}
+            else:
+                self.auto.pop(str(chapter_id), None)
+            self.auto_file.write_text(json.dumps(self.auto, ensure_ascii=False))
+        return {"chapterId": chapter_id, "on": on}
+
+    def auto_loop(self):
+        while True:
+            time.sleep(AUTO_POLL)
+            try:
+                self.auto_tick()
+            except Exception:
+                log.exception("audiosync auto")
+
+    def auto_tick(self, now=None):
+        now = now or time.time()
+        for cid, s in list(self.auto.items()):
+            if now < s.get("retry_at", 0):
+                continue
+            try:
+                self._auto_one(int(cid), s, now)
+            except Exception as e:  # Kavita/ABS/whisper down: try again after IDLE, not every minute
+                log.warning("audiosync auto %s: %s", cid, e)
+                s["last"], s["retry_at"] = {"at": now, "msg": f"Error: {e}"}, now + IDLE
+        with self.lock:
+            self.auto_file.write_text(json.dumps(self.auto, ensure_ascii=False))
+
+    def _auto_one(self, cid, s, now):
+        book, audio = list(self.ts.kavita.progress(cid)), self.abs.progress(s["itemId"])
+        if book != s["book"]:
+            s["book"], s["book_at"] = book, now
+        if abs(audio - s["audio"]) > 1:
+            s["audio"], s["audio_at"] = audio, now
+        book_new, audio_new = book != s["done_book"], abs(audio - s["done_audio"]) > 1
+        if now - max(s["book_at"], s["audio_at"]) < IDLE or not (book_new or audio_new):
+            return  # still reading/listening (or paused briefly), or nothing new
+        if book_new and (not audio_new or s["book_at"] >= s["audio_at"]):
+            msg = self._auto_to_audio(cid, s["itemId"], book, audio)
+        else:
+            msg = self._auto_to_book(cid, s["itemId"], book, audio)
+        # whatever both sides say now (including our own write) is the new "in step": no echo back
+        s["book"] = s["done_book"] = list(self.ts.kavita.progress(cid))
+        s["audio"] = s["done_audio"] = self.abs.progress(s["itemId"])
+        s["last"] = {"at": now, "msg": msg}
+        log.info("audiosync auto %s: %s", cid, msg)
+
+    def _anchored(self, key, i, value, scale):
+        """True if an anchor sits within 2% of `value` (i: 0 = seconds, 1 = char offset): estimates there are exact."""
+        return any(abs(a[i] - value) < 0.02 * scale for a in self.anchors.get(key, []))
+
+    def _auto_to_audio(self, cid, item_id, book, audio):
+        _, text, item, key = self._setup(cid, item_id)
+        target = text.offset(*book)
+        est = self._expected_time(key, target, item["duration"], text.total)[0]
+        if self._anchored(key, 1, target, text.total) and abs(est - audio) < 60:
+            return "Already in step (checked without transcribing)"
+        r = self.to_audio(cid, item_id)
+        if not r["found"]:
+            return r["reason"]
+        t = r["audio"]["time"]
+        if t <= audio + 30:
+            return f"Audiobook ({hms(audio)}) is already at or past the book position; left as is"
+        self.apply_audio(item_id, t)
+        return f"📖→🎧 Audiobook moved to {hms(t)}"
+
+    def _auto_to_book(self, cid, item_id, book, audio):
+        _, text, item, key = self._setup(cid, item_id)
+        current = text.offset(*book)
+        est = self._expected_offset(key, audio, item["duration"], text.total)
+        if self._anchored(key, 0, audio, item["duration"]) and abs(est - current) < 300:
+            return "Already in step (checked without transcribing)"
+        r = self.to_book(cid, item_id)
+        if not r["found"]:
+            return r["reason"]
+        t = r["target"]
+        if text.offset(t["pageNum"], t["bookScrollId"]) <= current + 200:
+            return f"Book ({r['current']['percent']}%) is already at or past the audiobook position; left as is"
+        self.ts.apply(cid, t["pageNum"], t["bookScrollId"])
+        return f"🎧→📖 Book moved to {t['percent']}% (“{t['head']}…”)"

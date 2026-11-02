@@ -48,6 +48,7 @@ def demo():
         def all(self): return [self.book_]
         def book(self, cid): return self.book_ if cid == 7 else None
         def progress(self, cid): return self.pos
+        def set_progress(self, book, page, scroll): self.pos = (page, scroll)
 
     class Abs:
         time, saved = 0.0, None
@@ -55,7 +56,7 @@ def demo():
         def in_progress(self): return ["li_1"]
         def item(self, i): return {"title": "Test book", "duration": duration, "files": [("/audiobooks/book.m4b", 0.0, duration)]}
         def progress(self, i): return self.time
-        def set_progress(self, i, s, d): self.saved = (i, s, d)
+        def set_progress(self, i, s, d): self.saved, self.time = (i, s, d), s
 
     kav, abs_ = Kavita(), Abs()
     ts = T.TextSync(tmp / "data", kav)
@@ -101,6 +102,54 @@ def demo():
     au.transcribe = lambda *a: "가나다라마바사 아자차카타파하 " * 20
     abs_.time = duration / 2
     assert not au.to_book(7, "li_1")["found"]
+    # 6. auto mode, on a simulated clock: a side that stopped moving for IDLE is carried over, forward only
+    calls = []
+    def counting(*a):
+        calls.append(a[1])
+        return narrator(*a)
+    au.transcribe = counting
+    at = lambda o: text.paras[text.at(o)][:2]           # Kavita position of the paragraph holding char o
+    pos = lambda f: int(text.total * f)
+    kav.pos, abs_.time = at(pos(0.15)), time_of(pos(0.15))
+    au.set_auto(7, "li_1", True)
+    now = au.auto["7"]["book_at"]
+    def tick(dt):
+        nonlocal now
+        now += dt
+        au.auto_tick(now)
+        return au.auto.get("7", {}).get("last")
+
+    # a. reading: nothing while pages turn, then the audiobook follows 5 minutes after the last page
+    kav.pos = at(pos(0.45))
+    assert tick(60) is None and tick(200) is None and not calls   # the move is seen at the first poll
+    assert "📖→🎧" in tick(100)["msg"], au.auto["7"]                # 5 minutes after that poll
+    assert abs(abs_.time - time_of(text.offset(*kav.pos))) < 3, (abs_.time, time_of(text.offset(*kav.pos)))
+    # b. our own write is not "new listening": no echo back to the book
+    n, last = len(calls), au.auto["7"]["last"]
+    assert tick(60) == last and tick(600) == last and len(calls) == n and kav.pos == at(pos(0.45))
+    # c. listening with short pauses: nothing until it has been still for 5 minutes, then the book follows
+    for dt in (60, 60, 240, 60):        # a 4-minute pause in the middle doesn't count as stopping
+        abs_.time += 50
+        assert tick(dt) == last
+    abs_.time += 50
+    assert tick(60) == last and tick(240) == last           # 5 min not reached yet
+    assert "🎧→📖" in tick(61)["msg"], au.auto["7"]
+    assert text.at(text.offset(*kav.pos)) in (text.at(offset_at(abs_.time)) - 1, text.at(offset_at(abs_.time)))
+    # d. going back in the book (re-reading) never drags the audiobook back
+    before = abs_.time
+    kav.pos = at(pos(0.2))
+    tick(60)                                            # seen at this poll ...
+    assert "left as is" in tick(300)["msg"] and abs_.time == before   # ... handled 5 minutes later
+    # e. already in step near an anchor: confirmed without transcribing anything
+    kav.pos, n = at(offset_at(abs_.time)), len(calls)
+    tick(60)
+    assert "Already in step" in tick(300)["msg"] and len(calls) == n
+    # f. state survives a restart; turning it off stops it
+    assert A.AudioSync(ts, tmp / "data", abs=abs_, transcriber=narrator).auto["7"]["done_audio"] == abs_.time
+    au.set_auto(7, "li_1", False)
+    kav.pos = at(pos(0.9))
+    tick(900)
+    assert "7" not in au.auto and abs_.time == before
     print("ok: all audiosync checks passed")
 
 

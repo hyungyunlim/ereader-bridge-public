@@ -508,11 +508,13 @@ class Http(BaseHTTPRequestHandler):
                 return self.reply(502, {"error": f"Kavita: {e}"})
         # audiobook <-> EPUB: "book" moves Kavita to the listening position (applied via /locate/apply),
         # "audio" finds the audiobook time of Kavita's position (applied via /audio/apply)
-        if parts in (["audio", "locate"], ["audio", "apply"]):
+        if parts in (["audio", "locate"], ["audio", "apply"], ["audio", "auto"]):
             if AUDIOSYNC is None:
                 return self.reply(503, {"error": "audio sync is not configured (AUDIOBOOKSHELF_URL/AUDIOBOOKSHELF_TOKEN)"})
             try:
                 b = self.body_json()
+                if parts == ["audio", "auto"]:
+                    return self.reply(200, AUDIOSYNC.set_auto(int(b["chapterId"]), b["itemId"], bool(b.get("on"))))
                 if parts == ["audio", "apply"]:
                     result = AUDIOSYNC.apply_audio(b["itemId"], float(b["time"]))
                     log.info("audiosync: %s -> %.0fs", result["title"], result["time"])
@@ -622,6 +624,7 @@ def main():
         threading.Thread(target=TEXTSYNC.warm, daemon=True).start()
         if audiosync.enabled():
             AUDIOSYNC = audiosync.AudioSync(TEXTSYNC, DATA)
+            threading.Thread(target=AUDIOSYNC.auto_loop, daemon=True).start()
     log.info("devices=%s smtp=:%d http=:%d", list(DEVICES), SMTP_PORT, HTTP_PORT)
     ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Http).serve_forever()
 

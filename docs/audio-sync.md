@@ -23,6 +23,32 @@ Open `http://<bridge>:8086/audio` (handy as a home-screen bookmark on your phone
 - If the Audiobookshelf app is open, reopen the book to pick up the new position. An app that keeps playing writes its
   own position over the server's.
 
+## Auto sync (per book)
+
+Press **Turn on auto sync** under a book on `/audio`, and whenever you **stop reading or listening for 5 minutes**, the
+other side is moved to your position. The two positions at the moment you turn it on count as "in step"; after that,
+only the side that moved is carried over. The latest auto action is shown in one line under the book.
+
+- **Watching**: every minute the bridge reads Kavita's progress and Audiobookshelf's position (two API calls).
+- **When it syncs**: after one side changes and **both sides have stayed put for 5 minutes**, the side that moved last
+  is carried over to the other.
+  - Nothing happens while you are reading (turning pages) or listening (the position keeps changing).
+  - A short pause that you resume within 5 minutes is ignored.
+  - While Audiobookshelf is playing its position keeps changing, so the audiobook position is never touched then.
+- **Forward only**: if the new position is behind the other side (somewhere you have already read or heard), nothing
+  changes. Re-reading or re-listening never drags the other side back; use the buttons to move back on purpose.
+- **No echo**: right after syncing, both positions are read again and recorded as "in step", so the bridge doesn't
+  mistake its own write for new progress and sync back the other way.
+- **One transcription run per session**: book → audiobook takes 2–5 transcriptions (10–20 s), audiobook → book one
+  (~5 s). If an anchor is nearby and the two positions already agree, it ends as "already in step" without transcribing.
+- **On failure**: a position that can't be found is skipped and tried again the next time you move. On a server error
+  it retries after 5 minutes.
+- **State**: the books with auto sync and their state live in `data/audio_auto.json` and survive restarts. Change the
+  wait with `AUDIOSYNC_IDLE_SECONDS` (default 300).
+- **Self-check**: `test_audiosync.py` runs on a simulated clock and checks: reading → 5 minutes → the audiobook follows;
+  no echo of the bridge's own write; listening with short pauses → 5 minutes → the book follows; going back is ignored;
+  no transcription when already in step; state survives a restart; turning it off stops it.
+
 ## How it works
 
 - **Audiobook → book**
@@ -90,5 +116,7 @@ chapter to chapter, with speech-recognition-like errors).
 - `POST /audio/locate` `{"chapterId", "itemId", "direction": "audio"}` →
   `{found, book{percent, head}, audio{itemId, title, time, current, duration}, backward}`
 - `POST /audio/apply` `{"itemId", "time"}` saves the Audiobookshelf listening position.
+- `POST /audio/auto` `{"chapterId", "itemId", "on"}` turns auto sync on or off for a book; `GET /audio/books`
+  reports it per book as `auto{on, last{at, msg}}`.
 
 The JSON endpoints return 503 when `AUDIOBOOKSHELF_URL`/`AUDIOBOOKSHELF_TOKEN` or the Kavita settings are missing.

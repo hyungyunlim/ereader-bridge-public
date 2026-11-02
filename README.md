@@ -15,7 +15,7 @@ It also includes:
 
 - **A KOReader plugin** that pulls the device's queue when KOReader starts or wakes up, so files arrive even where the bridge can't push. It updates itself from the bridge.
 - **Paper book → EPUB sync**: photograph the page you're on in a printed book, and the bridge finds that paragraph in the EPUB and moves your Kavita progress there. KOReader, or any app using Kavita's KOReader sync, then offers to jump to it. See [docs/paper-sync.md](docs/paper-sync.md).
-- **Audiobook ↔ EPUB sync**: moves your position between an Audiobookshelf audiobook and the Kavita EPUB, either way. The bridge transcribes 30 s of the audiobook with a whisper.cpp server and finds that passage in the book. See [docs/audio-sync.md](docs/audio-sync.md).
+- **Audiobook ↔ EPUB sync**: moves your position between an Audiobookshelf audiobook and the Kavita EPUB, either way. The bridge transcribes 30 s of the audiobook with a whisper.cpp server and finds that passage in the book. Per book, it can also sync automatically once you've stopped reading or listening for 5 minutes. See [docs/audio-sync.md](docs/audio-sync.md).
 - A small web page at `http://<bridge>:8086/` with the queue, history, cancel and resend.
 
 Python standard library plus `aiosmtpd`, in one Docker container (with `ffmpeg` for audiobook sync, which also needs a whisper.cpp server).
@@ -105,7 +105,7 @@ Set `NOTIFY_URL` and the bridge POSTs `{"event", "device", "file"}` on each even
 - `DELETE /jobs/<device>/<job>` cancels a job. It returns 409 if the job is being delivered.
 - `POST /jobs/<device>/<job>/resend?to=<device>` sends a delivered file again.
 - `GET /sync`, `POST /locate`, `POST /locate/apply` and `GET /locate/books` belong to paper → EPUB sync ([docs/paper-sync.md](docs/paper-sync.md)).
-- `GET /audio`, `GET /audio/books`, `POST /audio/locate` and `POST /audio/apply` belong to audiobook ↔ EPUB sync ([docs/audio-sync.md](docs/audio-sync.md)).
+- `GET /audio`, `GET /audio/books`, `POST /audio/locate`, `POST /audio/apply` and `POST /audio/auto` belong to audiobook ↔ EPUB sync ([docs/audio-sync.md](docs/audio-sync.md)).
 
 ## Development
 
