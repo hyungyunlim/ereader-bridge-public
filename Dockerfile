@@ -1,7 +1,8 @@
 FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg && rm -rf /var/lib/apt/lists/*  # audiobook clips
 RUN pip install --no-cache-dir aiosmtpd==1.4.6
 WORKDIR /app
-COPY bridge.py textsync.py ./
+COPY bridge.py textsync.py audiosync.py ./
 COPY koreader ./koreader
 COPY web ./web
 ENV PYTHONUNBUFFERED=1

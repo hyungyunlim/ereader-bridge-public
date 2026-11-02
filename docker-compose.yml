@@ -3,6 +3,10 @@ services:
     build: .
     container_name: ereader-bridge
     restart: unless-stopped
+    # Optional: join Kavita's and Audiobookshelf's Docker networks and call them by container name
+    # (KAVITA_URL=http://kavita:5000, AUDIOBOOKSHELF_URL=http://audiobookshelf:80) instead of going through
+    # host.docker.internal. Uncomment together with the "networks:" block at the bottom.
+    # networks: [default, kavita, audiobookshelf]
     ports:
       - "2525:2525"  # SMTP in (Kavita "Send to Device")
       - "8086:8086"  # HTTP in (PUT /send/<device>/<filename>, GET /status, KOReader pull, /sync)
@@ -11,6 +15,9 @@ services:
       # Paper -> EPUB sync only: mount Kavita's library at the SAME paths Kavita sees inside its own container
       # (the bridge reads the EPUB paths Kavita reports). Remove if you don't use /sync.
       - /path/to/your/books:/books:ro
+      # Audiobook <-> EPUB sync only: mount the audiobooks at the SAME paths Audiobookshelf sees inside its
+      # container (the bridge cuts clips from the file paths Audiobookshelf reports). Remove if unused.
+      - /path/to/your/audiobooks:/audiobooks:ro
     env_file:
       - path: .env        # copy .env.example to .env (KAVITA_API_KEY, NOTIFY_URL); not in git
         required: false
@@ -18,6 +25,10 @@ services:
       - TZ=UTC
       - SCAN_SUBNET=192.168.1.0/24   # where BOOX devices are searched for when their IP changes
       - KAVITA_URL=http://host.docker.internal:5000   # paper -> EPUB sync; leave KAVITA_API_KEY empty to disable
+      # Audiobook <-> EPUB sync (docs/audio-sync.md); leave AUDIOBOOKSHELF_TOKEN in .env empty to disable.
+      # whisper-server runs on the host (scripts/install-whisper-server.sh).
+      - AUDIOBOOKSHELF_URL=http://host.docker.internal:13378
+      - WHISPER_URL=http://host.docker.internal:8178
       - NOTIFY_EVENTS=delivered,pulled
       # Device name = SMTP local-part (<name>@anything) and HTTP path segment.
       # boox: "host" is a first guess; the device is found again by "id" (from GET http://<boox>:8085/api/device).
@@ -26,3 +37,11 @@ services:
       # alt_hosts: other fixed addresses of the same device, e.g. its WireGuard IP when away from home.
       - 'DEVICES={"palma":   {"driver": "boox", "id": "aa:bb:cc:dd:ee:ff", "host": "192.168.1.50"},
                   "moosnap": {"driver": "moosnap", "host": "192.168.1.51", "alt_hosts": ["10.0.0.51"]}}'
+
+# networks:
+#   kavita:
+#     name: kavita_default            # the network Kavita's compose project created (docker network ls)
+#     external: true
+#   audiobookshelf:
+#     name: audiobookshelf_default
+#     external: true

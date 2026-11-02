@@ -30,6 +30,8 @@
   textarea { width:100%; min-height:120px; font:inherit; font-size:15px; padding:10px; border-radius:10px; border:1px solid var(--line); background:var(--card); color:var(--ink); }
   ul { list-style:none; padding:0; margin:8px 0 0; }
   li button { width:100%; text-align:left; font-weight:500; display:flex; justify-content:space-between; gap:8px; margin-top:8px; }
+  .pair { padding:12px 0 2px; border-top:1px solid var(--line); margin-top:10px; }
+  .head { margin-top:10px; padding:10px 12px; border-left:3px solid var(--accent); background:color-mix(in srgb, var(--accent) 8%, transparent); border-radius:6px; font-size:15px; }
   .hidden { display:none; }
 </style>
 </head>
@@ -43,7 +45,9 @@
     <div class="muted">You can also paste text from a photo of the page.</div>
     <textarea id="text" placeholder="Text of the printed page"></textarea>
     <div class="row"><button class="primary" id="find">Find</button></div>
+    <div class="muted" style="margin-top:12px"><a href="/audio">🎧 Sync with an audiobook →</a></div>
   </div>
+  <div id="audio" class="card hidden"></div>
 </main>
 <script>
 const $ = (id) => document.getElementById(id);
@@ -89,7 +93,7 @@ function showResult(r) {
   const paras = t.paras && t.paras.length ? t.paras : [{ bookScrollId: t.bookScrollId, percent: t.percent, head: t.head }];
   let sel = paras[0];
   const big = el("div", { class: "big" }), warn = el("div", { class: "warn" });
-  const pick = el("div", { class: "pick" }, el("div", { class: "muted" }, "Where did you stop? Reading resumes at that paragraph."));
+  const pick = el("div", { class: "pick" }, el("div", { class: "muted" }, r.audio ? "Where did you stop listening? Reading resumes at that paragraph." : "Where did you stop? Reading resumes at that paragraph."));
   const choose = (p, btn) => {
     sel = p;
     for (const b of pick.querySelectorAll("button")) b.classList.toggle("on", b === btn);
@@ -115,11 +119,11 @@ function showResult(r) {
     el("div", { class: "title" }, r.book.title),
     el("div", { class: "muted" }, t.section || ""),
     big,
-    el("div", { class: "muted" }, `Current EPUB progress ${c.percent}%${r.searched === "all" ? " · found in all EPUBs" : ""} · match ${Math.round(r.score * 100)}%`),
+    el("div", { class: "muted" }, `Current EPUB progress ${c.percent}%${r.searched === "all" ? " · found in all EPUBs" : ""}${r.audio ? ` · audiobook at ${hms(r.audio.time)}` : ""} · match ${Math.round(r.score * 100)}%`),
     warn,
     pick,
     el("div", { class: "row" }, el("button", { onclick: () => { box.replaceChildren(el("div", { class: "muted" }, "Cancelled. Nothing was changed.")); } }, "Cancel"), apply),
-    el("div", { class: "row" }, el("button", { onclick: pickBook }, "Wrong book")));
+    r.audio ? "" : el("div", { class: "row" }, el("button", { onclick: pickBook }, "Wrong book")));
   show("result");
 }
 
@@ -136,8 +140,67 @@ async function pickBook() {
   } catch (e) { status("Bridge error: " + e.message); }
 }
 
+// ---- audiobook <-> EPUB (/audio): Audiobookshelf position <-> Kavita position
+const hms = (s) => { s = Math.round(s); return `${Math.floor(s / 3600)}:${String(Math.floor(s % 3600 / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`; };
+
+async function audioBooks() {
+  document.querySelector("h1").textContent = document.title = "🎧 Audiobook ↔ EPUB position";
+  show("result", false);
+  status("Loading the books you are reading or listening to…");
+  try {
+    const { books } = await api("GET", "/audio/books");
+    show("status", false);
+    const box = $("audio");
+    box.replaceChildren(el("div", { class: "title" }, "Books and audiobooks"),
+      books.length ? "" : el("div", { class: "muted" }, "No book in progress has the same title in both Kavita and Audiobookshelf."));
+    for (const b of books) {
+      const a = b.audio;
+      box.append(el("div", { class: "pair" },
+        el("div", { class: "title" }, b.title),
+        el("div", { class: "muted" }, `Book ${b.book.percent}% · audiobook ${hms(a.time)} / ${hms(a.duration)} (${Math.round(100 * a.time / a.duration)}%)`),
+        el("div", { class: "row" },
+          el("button", { onclick: () => audioLocate(b, "book") }, "🎧→📖 Sync book"),
+          el("button", { onclick: () => audioLocate(b, "audio") }, "📖→🎧 Sync audiobook"))));
+    }
+    show("audio");
+  } catch (e) { status("Bridge error: " + e.message); }
+}
+
+async function audioLocate(b, direction) {
+  show("audio", false); show("result", false);
+  status(direction === "book" ? "Listening to the audiobook and finding it in the book… (about 10 s)" : "Finding the book position in the audiobook… (about 20 s)");
+  try {
+    const r = await api("POST", "/audio/locate", { chapterId: b.chapterId, itemId: b.audio.itemId, direction });
+    show("status", false);
+    if (!r.found) return notFound(r.reason);
+    direction === "book" ? showResult(r) : showAudio(r);
+  } catch (e) { status("Error: " + e.message); show("audio"); }
+}
+
+function showAudio(r) {
+  const a = r.audio, box = $("result");
+  const apply = el("button", { class: "primary" }, "Sync");
+  apply.onclick = async () => {
+    apply.disabled = true;
+    try {
+      await api("POST", "/audio/apply", { itemId: a.itemId, time: a.time });
+      box.replaceChildren(el("div", { class: "title ok" }, "✓ Saved to Audiobookshelf"),
+        el("div", { class: "muted" }, `${a.title}: resume listening at ${hms(a.time)}. If the app is open, reopen the book.`));
+    } catch (e) { apply.disabled = false; status("Saving failed: " + e.message); }
+  };
+  box.replaceChildren(
+    el("div", { class: "title" }, a.title),
+    el("div", { class: "big" }, hms(a.time)),
+    el("div", { class: "muted" }, `Current audiobook position ${hms(a.current)} · book ${r.book.percent}%`),
+    r.book.head ? el("div", { class: "head" }, `Plays from the paragraph starting “${r.book.head}…”`) : "",
+    r.backward ? el("div", { class: "warn" }, "⚠ This is earlier than your current audiobook position.") : "",
+    el("div", { class: "row" }, el("button", { onclick: audioBooks }, "Cancel"), apply));
+  show("result");
+}
+
 $("find").onclick = () => { pageText = $("text").value; show("manual", false); locate(); };
-if (pageText) locate(); else { show("status", false); show("manual"); }
+if (location.pathname === "/audio") audioBooks();
+else if (pageText) locate(); else { show("status", false); show("manual"); }
 </script>
 </body>
 </html>

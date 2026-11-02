@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse, parse_qs
 from urllib.request import Request, urlopen
 
+import audiosync
 import textsync
 
 log = logging.getLogger("bridge")
@@ -402,8 +403,8 @@ class Http(BaseHTTPRequestHandler):
         parts, q = self.route()
         if parts == ["health"]:
             return self.reply(200, {"ok": True})
-        if parts in ([], ["sync"]):
-            if parts:
+        if parts in ([], ["sync"], ["audio"]):
+            if parts == ["sync"]:
                 log.info("sync page: %d chars of text from %s", len(q.get("text", [""])[0]), self.client_address[0])
             body = (PAGE if not parts else SYNC_PAGE).encode()
             self.send_response(200)
@@ -422,6 +423,14 @@ class Http(BaseHTTPRequestHandler):
                 "history": list(history)})
         if len(parts) == 3 and parts[0] == "jobs" and parts[1] in DEVICES:
             return self.reply(200, {"job": parts[2], "status": job_status(parts[1], parts[2])})
+        if parts == ["audio", "books"]:
+            if AUDIOSYNC is None:
+                return self.reply(503, {"error": "audio sync is not configured (AUDIOBOOKSHELF_URL/AUDIOBOOKSHELF_TOKEN)"})
+            try:
+                return self.reply(200, {"books": AUDIOSYNC.pairs()})
+            except Exception as e:
+                log.exception("audiosync books failed")
+                return self.reply(502, {"error": str(e)})
         if parts == ["locate", "books"]:
             if not textsync_ready():
                 return self.reply(503, {"error": "textsync is not configured (KAVITA_URL/KAVITA_API_KEY)"})
@@ -497,6 +506,24 @@ class Http(BaseHTTPRequestHandler):
             except Exception as e:
                 log.exception("textsync failed")
                 return self.reply(502, {"error": f"Kavita: {e}"})
+        # audiobook <-> EPUB: "book" moves Kavita to the listening position (applied via /locate/apply),
+        # "audio" finds the audiobook time of Kavita's position (applied via /audio/apply)
+        if parts in (["audio", "locate"], ["audio", "apply"]):
+            if AUDIOSYNC is None:
+                return self.reply(503, {"error": "audio sync is not configured (AUDIOBOOKSHELF_URL/AUDIOBOOKSHELF_TOKEN)"})
+            try:
+                b = self.body_json()
+                if parts == ["audio", "apply"]:
+                    result = AUDIOSYNC.apply_audio(b["itemId"], float(b["time"]))
+                    log.info("audiosync: %s -> %.0fs", result["title"], result["time"])
+                    return self.reply(200, result)
+                go = AUDIOSYNC.to_book if b.get("direction") == "book" else AUDIOSYNC.to_audio
+                return self.reply(200, go(int(b["chapterId"]), b["itemId"]))
+            except (KeyError, ValueError) as e:
+                return self.reply(400, {"error": str(e)})
+            except Exception as e:
+                log.exception("audiosync failed")
+                return self.reply(502, {"error": f"{type(e).__name__}: {e}"})
         if len(parts) == 4 and parts[0] == "jobs" and parts[1] in DEVICES and parts[3] == "resend":
             to = q.get("to", [parts[1]])[0]
             if to not in DEVICES:
@@ -565,6 +592,7 @@ class Smtp:
 
 
 TEXTSYNC = None
+AUDIOSYNC = None
 
 
 def textsync_ready():
@@ -572,7 +600,7 @@ def textsync_ready():
 
 
 def main():
-    global TEXTSYNC
+    global TEXTSYNC, AUDIOSYNC
     logging.basicConfig(level=os.environ.get("LOG_LEVEL", "INFO"), format="%(asctime)s %(levelname)s %(message)s")
     logging.getLogger("mail.log").setLevel(logging.WARNING)  # aiosmtpd logs every SMTP command at INFO
     from aiosmtpd.controller import Controller
@@ -592,6 +620,8 @@ def main():
     if textsync.enabled():
         TEXTSYNC = textsync.TextSync(DATA)
         threading.Thread(target=TEXTSYNC.warm, daemon=True).start()
+        if audiosync.enabled():
+            AUDIOSYNC = audiosync.AudioSync(TEXTSYNC, DATA)
     log.info("devices=%s smtp=:%d http=:%d", list(DEVICES), SMTP_PORT, HTTP_PORT)
     ThreadingHTTPServer(("0.0.0.0", HTTP_PORT), Http).serve_forever()
 
