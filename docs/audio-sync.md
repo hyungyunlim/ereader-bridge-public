@@ -10,12 +10,12 @@ Audiobookshelf position (seconds) ⇄ bridge ⇄ Kavita progress (paragraph) ⇄
                  30 s of the audiobook transcribed by a whisper.cpp server
 ```
 
-Open `http://<bridge>:8086/audio` (handy as a home-screen bookmark on your phone). The `/sync` page links to it too.
+Open **Audiobook** in the web app, `http://<bridge>:8086/audio` (handy as a home-screen bookmark on your phone).
 
-- Each book has two buttons. Nothing changes until you confirm with **Sync**.
-  - **🎧→📖 Sync book**: finds the listening position in the book and lists the paragraphs around it. Pick the one you
+- Each book shows both positions and has two buttons. Nothing changes until you confirm with **Apply**.
+  - **Sync book**: finds the listening position in the book and lists the paragraphs around it. Pick the one you
     listened up to and it is saved to Kavita (the same picker as paper → EPUB sync).
-  - **📖→🎧 Sync audiobook**: finds the time where the narrator starts Kavita's paragraph and saves it to Audiobookshelf.
+  - **Sync audiobook**: finds the time where the narrator starts Kavita's paragraph and saves it to Audiobookshelf.
 - Books listed: EPUBs on Kavita's On Deck and audiobooks you are listening to in Audiobookshelf that exist in **both,
   with the same title** (spaces and punctuation ignored).
 - Time taken: about 5 s for the book, 10–20 s for the audiobook (a few transcriptions). The first list after the bridge
@@ -25,7 +25,7 @@ Open `http://<bridge>:8086/audio` (handy as a home-screen bookmark on your phone
 
 ## Auto sync (per book)
 
-Press **Turn on auto sync** under a book on `/audio`, and whenever you **stop reading or listening for 5 minutes**, the
+Turn on the **Auto sync** switch under a book on `/audio`, and whenever you **stop reading or listening for 5 minutes**, the
 other side is moved to your position. The two positions at the moment you turn it on count as "in step"; after that,
 only the side that moved is carried over. The latest auto action is shown in one line under the book.
 

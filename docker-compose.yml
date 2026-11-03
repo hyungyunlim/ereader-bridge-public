@@ -9,12 +9,13 @@ services:
     # networks: [default, kavita, audiobookshelf]
     ports:
       - "2525:2525"  # SMTP in (Kavita "Send to Device")
-      - "8086:8086"  # HTTP in (PUT /send/<device>/<filename>, GET /status, KOReader pull, /sync)
+      - "8086:8086"  # HTTP in: the web app, PUT /send/<device>/<filename>, GET /status, KOReader pull
     volumes:
       - ./data:/data
-      # Paper -> EPUB sync only: mount Kavita's library at the SAME paths Kavita sees inside its own container
-      # (the bridge reads the EPUB paths Kavita reports). Remove if you don't use /sync.
-      - /path/to/your/books:/books:ro
+      # Kavita's library at the SAME path Kavita sees inside its own container: paper -> EPUB sync reads the
+      # EPUB paths Kavita reports, and books dropped on the web page are filed into it (needs read-write;
+      # add ":ro" if you don't use that). More libraries: mount each and list them in LIBRARY_DIRS.
+      - /path/to/your/books:/books
       # Audiobook <-> EPUB sync only: mount the audiobooks at the SAME paths Audiobookshelf sees inside its
       # container (the bridge cuts clips from the file paths Audiobookshelf reports). Remove if unused.
       - /path/to/your/audiobooks:/audiobooks:ro
@@ -25,6 +26,7 @@ services:
       - TZ=UTC
       - SCAN_SUBNET=192.168.1.0/24   # where BOOX devices are searched for when their IP changes
       - KAVITA_URL=http://host.docker.internal:5000   # paper -> EPUB sync; leave KAVITA_API_KEY empty to disable
+      - LIBRARY_DIRS=/books   # where dropped EPUBs can go, e.g. /books,/kidsbooks
       # Audiobook <-> EPUB sync (docs/audio-sync.md); leave AUDIOBOOKSHELF_TOKEN in .env empty to disable.
       # whisper-server runs on the host (scripts/install-whisper-server.sh).
       - AUDIOBOOKSHELF_URL=http://host.docker.internal:13378

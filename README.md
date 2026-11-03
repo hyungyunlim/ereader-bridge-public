@@ -16,7 +16,8 @@ It also includes:
 - **A KOReader plugin** that pulls the device's queue when KOReader starts or wakes up, so files arrive even where the bridge can't push. It updates itself from the bridge.
 - **Paper book → EPUB sync**: photograph the page you're on in a printed book, and the bridge finds that paragraph in the EPUB and moves your Kavita progress there. KOReader, or any app using Kavita's KOReader sync, then offers to jump to it. See [docs/paper-sync.md](docs/paper-sync.md).
 - **Audiobook ↔ EPUB sync**: moves your position between an Audiobookshelf audiobook and the Kavita EPUB, either way. The bridge transcribes 30 s of the audiobook with a whisper.cpp server and finds that passage in the book. Per book, it can also sync automatically once you've stopped reading or listening for 5 minutes. See [docs/audio-sync.md](docs/audio-sync.md).
-- A small web page at `http://<bridge>:8086/` with the queue, history, cancel and resend.
+- **Add books to Kavita**: drop EPUBs on the web page and they are filed as `<library>/<author>/<title>/<title>.epub`, skipped if the same file is already in the library, and Kavita scans them right away.
+- **A web app** at `http://<bridge>:8086/` for all of the above: an overview, devices and queue (cancel, resend), adding books, paper book and audiobook sync. Top menu on desktop, bottom tab bar on phones; add it to your home screen.
 
 Python standard library plus `aiosmtpd`, in one Docker container (with `ffmpeg` for audiobook sync, which also needs a whisper.cpp server).
 
@@ -94,13 +95,38 @@ This is a Kavita feature; the bridge doesn't do the syncing itself. In KOReader,
 
 Only files that are **byte-identical** to Kavita's copy are matched. Books delivered through this bridge are, because it sends Kavita's original file. Readest works the same way (Settings → KOReader Sync, checksum "File Content").
 
+## Web app
+
+One page (`web/app.html`) served at each screen's path:
+
+| Path | Screen |
+|---|---|
+| `/` | Overview: a card per feature with its status, books in progress, recent sends |
+| `/devices` | Devices and queue: reachability, plugin version, queued files (cancel), history (resend, also to another device), how to send |
+| `/library` | Add books (below) |
+| `/sync` | Paper book position; the iOS shortcut opens `/sync?text=…` |
+| `/audio` | Audiobook position |
+
+An EPUB dropped on any screen is added to the library.
+
+## Adding books to Kavita
+
+Drop EPUBs on the web page (or `PUT /library/<library>/<filename>` with the file as the body):
+
+- The file is saved as `<library>/<author>/<title>/<title>.epub`. Author is every `dc:creator` joined with `, ` (`Unknown` if none), title is `dc:title` (the file name if none).
+- `/ \ : * ? " < > |` in names become full-width look-alikes (`／`, `：`, …); leading and trailing dots and spaces are dropped, names are cut at 80 characters.
+- If a byte-identical EPUB is already anywhere in the library, nothing is saved (200, `duplicate: true`). Same title with different content is saved as `<title>_1.epub` (201).
+- The file is written under a hidden name and renamed when complete, so a scan never sees half a file.
+- Then the bridge asks Kavita to scan that library (`POST /api/Library/scan`, not forced, so only changed folders are read). Kavita's `scan-folder` API is not used: it does nothing for a folder Kavita doesn't know yet, which is every new author. If the scan request fails the file is still saved, and Kavita's scheduled scan finds it.
+- Libraries are the folders in `LIBRARY_DIRS` (default `/books`, comma-separated, named by their last path part). Mount them **read-write** at the same paths Kavita uses. With more than one, the page lets you choose.
+
 ## Notifications (optional)
 
 Set `NOTIFY_URL` and the bridge POSTs `{"event", "device", "file"}` on each event in `NOTIFY_EVENTS` (default `queued,delivered,pulled`). `ha/ereader_bridge.example.yaml` is a Home Assistant package that turns this into phone notifications, and also watches `/health` to tell you when the bridge is down.
 
 ## Other HTTP endpoints
 
-- `GET /status` returns the devices, queues and history as JSON.
+- `GET /status` returns the devices, queues, history and library names as JSON.
 - `GET /health` returns `{"ok": true}`.
 - `DELETE /jobs/<device>/<job>` cancels a job. It returns 409 if the job is being delivered.
 - `POST /jobs/<device>/<job>/resend?to=<device>` sends a delivered file again.

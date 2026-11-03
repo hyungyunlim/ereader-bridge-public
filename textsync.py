@@ -321,6 +321,15 @@ class Kavita:
         p = self._req("GET", f"/api/Reader/get-progress?chapterId={chapter_id}") or {}
         return p.get("pageNum", 0), p.get("bookScrollId")
 
+    def scan_library(self, path):
+        """Scan the library holding path. (scan-folder silently skips folders Kavita doesn't know yet;
+        a library scan only reads changed folders, about a second for a few hundred books.)"""
+        for lib in self._req("GET", "/api/Library/libraries") or []:
+            if any(path == f or path.startswith(f.rstrip("/") + "/") for f in lib.get("folders", [])):
+                self._req("POST", f"/api/Library/scan?libraryId={lib['id']}&force=false")
+                return lib["name"]
+        raise LookupError(f"no Kavita library holds {path}")
+
     def set_progress(self, book, page_num, scroll_id):
         self._req("POST", "/api/Reader/progress", {
             "volumeId": book["volumeId"], "chapterId": book["chapterId"], "seriesId": book["seriesId"],

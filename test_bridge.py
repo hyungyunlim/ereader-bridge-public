@@ -109,10 +109,11 @@ def wait_for(cond, secs=10):
 
 def demo():
     boox_port, moo_port, smtp_port, http_port, hook_port = (free_port() for _ in range(5))
+    library = os.path.join(tempfile.mkdtemp(), "books")
     serve(FakeWebhook, hook_port)
     os.environ.update(
         DATA_DIR=tempfile.mkdtemp(), SCAN_SUBNET="127.0.0.1/32", POLL_SECONDS="0.5", SCAN_EVERY_SECONDS="0", PROBE_TIMEOUT_SECONDS="0.5", NOTIFY_URL=f"http://127.0.0.1:{hook_port}/hook",
-        SMTP_PORT=str(smtp_port), HTTP_PORT=str(http_port), LOG_LEVEL="WARNING",
+        SMTP_PORT=str(smtp_port), HTTP_PORT=str(http_port), LOG_LEVEL="WARNING", LIBRARY_DIRS=library,
         DEVICES=json.dumps({"Palma2": {"driver": "boox", "id": "aa:bb", "host": "127.0.0.1", "port": boox_port},
                             "moosnap-neo": {"driver": "moosnap", "host": "127.0.0.1", "port": moo_port},
                             # wrong IP on purpose: must stay offline, not latch onto the Neo via a rescan
@@ -262,11 +263,54 @@ def demo():
 
     # 17. paper -> EPUB sync is off without Kavita settings (503), its page is still served
     assert send("POST", f"{base}/locate")[0] == 503
-    assert "Paper book" in urllib.request.urlopen(base + "/sync").read().decode()
+    for path in ("/sync?text=x", "/audio", "/devices", "/library"):
+        assert "Paper book position" in urllib.request.urlopen(base + path).read().decode(), path
+
+    # 18. a dropped EPUB is filed as <author>/<title>/<title>.epub; an identical file is not saved twice
+    def epub(title, creators, extra=b""):
+        import io, zipfile
+        b = io.BytesIO()
+        with zipfile.ZipFile(b, "w") as z:
+            z.writestr("META-INF/container.xml", "<container xmlns='urn:oasis:names:tc:opendocument:xmlns:container'>"
+                       "<rootfiles><rootfile full-path='OPS/book.opf'/></rootfiles></container>")
+            dc = "".join(f"<dc:creator>{c}</dc:creator>" for c in creators) + (f"<dc:title>{title}</dc:title>" if title else "")
+            z.writestr("OPS/book.opf", "<package xmlns='http://www.idpf.org/2007/opf' xmlns:dc='http://purl.org/dc/elements/1.1/'>"
+                       f"<metadata>{dc}</metadata></package>")
+            z.writestr("x", extra)
+        return b.getvalue()
+
+    def drop(lib, name, data):
+        try:
+            with urllib.request.urlopen(urllib.request.Request(f"{base}/library/{lib}/{quote(name, safe='')}", data=data, method="PUT")) as r:
+                return r.status, json.loads(r.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read() or b"{}")
+
+    lib = pathlib.Path(library)
+    code, r = drop("books", "pachinko.epub", epub("파친코 1", ["이민진", "신승미"]))
+    assert code == 201 and r["file"] == str(lib / "이민진, 신승미/파친코 1/파친코 1.epub") and not r["duplicate"], r
+    assert r["scan"].startswith("skipped"), r                           # no Kavita configured in this test
+    assert drop("books", "copy.epub", epub("파친코 1", ["이민진", "신승미"]))[1]["duplicate"]   # same bytes
+    code, r = drop("books", "x.epub", epub("파친코 1", ["이민진", "신승미"], b"other edition"))
+    assert code == 201 and r["file"].endswith("파친코 1/파친코 1_1.epub"), r            # same name, other bytes
+    code, r = drop("books", "../../Why Nations Fail.epub", epub("Why Nations Fail: Power / Poverty", []))
+    assert r["file"] == str(lib / "Unknown/Why Nations Fail： Power ／ Poverty/Why Nations Fail： Power ／ Poverty.epub"), r
+    code, r = drop("books", "제목없음.epub", epub("", ["...숨은 저자"]))
+    assert r["file"] == str(lib / "숨은 저자/제목없음/제목없음.epub"), r                    # no leading dot: not hidden
+    assert drop("books", "fake.epub", b"not a zip")[0] == 400
+    assert drop("comics", "a.epub", epub("a", []))[0] == 404
+    assert not list(lib.rglob("*.part")) and len(list(lib.rglob("*.epub"))) == 4
+    assert get_json(f"{base}/status")["libraries"] == ["books"]          # the page builds its library choice from this
+    # ... and Kavita scans the library that holds it (/books is not a prefix of /kidsbooks)
+    import textsync
+    k, scans = textsync.Kavita("http://kavita", "key"), []
+    k._req = lambda m, p, b=None: scans.append(p) if m == "POST" else [
+        {"id": 1, "name": "Books", "folders": ["/books"]}, {"id": 3, "name": "Kidsbooks", "folders": ["/kidsbooks/"]}]
+    assert k.scan_library("/kidsbooks/a/b/b.epub") == "Kidsbooks" and scans == ["/api/Library/scan?libraryId=3&force=false"]
 
     # 15. queue page
     page = urllib.request.urlopen(base + "/").read().decode()
-    assert "ereader-bridge" in page and "/status" in page
+    assert "ereader-bridge" in page and "/status" in page and "/library/" in page
 
     status = json.load(urllib.request.urlopen(base + "/status"))
     assert status["devices"]["palma2"]["online"] and status["devices"]["palma2"]["queued"] == []

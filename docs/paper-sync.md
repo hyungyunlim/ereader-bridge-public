@@ -7,13 +7,13 @@ progress sync server, then offers to jump to that position when you open the boo
 ```
 iOS shortcut: photo → on-device text recognition → http://<bridge>:8086/sync?text=…
 bridge /sync: search the EPUBs you're reading (Kavita "On Deck"), then every EPUB → confirmation page
-[Sync] → Kavita progress (chapter + paragraph) → KOReader / Readest progress sync
+[Apply] → Kavita progress (chapter + paragraph) → KOReader / Readest progress sync
 ```
 
 ## Setup
 
 1. Set `KAVITA_API_KEY` in `.env` and `KAVITA_URL` in `docker-compose.yml`. The API key is under Kavita's user settings.
-2. Mount your Kavita library into the bridge **at the same paths Kavita uses**, for example `/path/to/books:/books:ro` if Kavita sees the library as `/books`. The bridge opens the EPUB files that Kavita's API reports.
+2. Mount your Kavita library into the bridge **at the same paths Kavita uses**, for example `/path/to/books:/books` if Kavita sees the library as `/books`. The bridge opens the EPUB files that Kavita's API reports. Read-only (`:ro`) is enough for this; adding books from the web app needs read-write.
 3. Restart the bridge. On start it indexes every EPUB in Kavita in the background; 300 books took about a minute. The index is cached in `data/textindex/` and rebuilt when a file changes.
 
 Progress is saved for the Kavita user who owns the API key. KOReader's progress sync has to use the same user.
@@ -39,7 +39,7 @@ You can also open `http://<bridge>:8086/sync` in any browser and paste the text.
 
 - Photograph the page where you stopped. The page should fill most of the photo; under 30 characters of text is rejected.
 - The confirmation page shows the book, the chapter and the position as a percentage.
-  - It lists the paragraphs on that page, including the cut-off ones at the top and bottom. **Tap the one you stopped at**, then [Sync].
+  - It lists the paragraphs on that page, including the cut-off ones at the top and bottom. **Tap the one you stopped at**, then [Apply].
   - You get a warning if the position is earlier than your current EPUB progress, which usually means the wrong book or an old page.
   - [Wrong book] lets you choose from the books you're reading.
 

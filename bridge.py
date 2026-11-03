@@ -14,6 +14,9 @@ import shutil
 import threading
 import time
 import uuid
+import io
+import xml.etree.ElementTree as ET
+import zipfile
 from collections import deque
 from email import policy
 from email.parser import BytesParser
@@ -38,9 +41,11 @@ PROBE_TIMEOUT = float(os.environ.get("PROBE_TIMEOUT_SECONDS", "4"))  # e-ink Wi-
 MAX_BYTES = int(os.environ.get("MAX_BYTES", str(1 << 30)))
 SMTP_PORT = int(os.environ.get("SMTP_PORT", "2525"))
 HTTP_PORT = int(os.environ.get("HTTP_PORT", "8086"))
+# Kavita library folders a dropped EPUB can be filed into (same paths inside Kavita's container)
+LIBRARIES = {Path(p).name: Path(p) for p in os.environ.get("LIBRARY_DIRS", "/books").split(",") if p}
 PLUGIN_DIR = Path(os.environ.get("PLUGIN_DIR", Path(__file__).parent / "koreader" / "bridgesync.koplugin"))
-PAGE = (Path(__file__).parent / "web" / "index.html").read_text(encoding="utf-8")  # GET / : queue page
-SYNC_PAGE = (Path(__file__).parent / "web" / "sync.html").read_text(encoding="utf-8")  # GET /sync : paper -> EPUB
+APP = (Path(__file__).parent / "web" / "app.html").read_bytes()  # every screen; the page routes by its path
+APP_PATHS = ([], ["devices"], ["library"], ["sync"], ["audio"])
 # e.g. a Home Assistant webhook: http://homeassistant.local:8123/api/webhook/<id>
 NOTIFY_URL = os.environ.get("NOTIFY_URL", "")
 NOTIFY_EVENTS = set(os.environ.get("NOTIFY_EVENTS", "queued,delivered,pulled").split(","))
@@ -149,6 +154,51 @@ def safe_name(name):
     if name in ("", ".", ".."):
         raise ValueError("bad filename")
     return name
+
+
+# ---- Kavita library: a dropped EPUB is filed as <library>/<author>/<title>/<title>.epub ----
+
+DC = "{http://purl.org/dc/elements/1.1/}"
+# full-width look-alikes for characters a folder name can't hold (keeps titles like "Title: Subtitle" readable)
+UNSAFE = str.maketrans('/\\:*?"<>|', "／＼：＊？＂＜＞｜")
+
+
+def epub_meta(data):
+    """(title, authors) from the EPUB's OPF; ValueError if it isn't an EPUB."""
+    try:
+        z = zipfile.ZipFile(io.BytesIO(data))
+        opf = ET.fromstring(z.read("META-INF/container.xml")).find(".//{*}rootfile").get("full-path")
+        root = ET.fromstring(z.read(opf))
+    except (zipfile.BadZipFile, KeyError, AttributeError, ET.ParseError) as e:
+        raise ValueError(f"not an EPUB: {e}")
+    texts = lambda tag: [" ".join(e.text.split()) for e in root.iter(DC + tag) if e.text and e.text.strip()]
+    return (texts("title") or [""])[0], texts("creator")
+
+
+def folder_name(s, fallback):
+    s = "".join(c for c in s.translate(UNSAFE) if c.isprintable()).strip(" .")  # leading dot = hidden from Kavita
+    return s[:80].strip(" .") or fallback   # 80 Hangul = 240 bytes, under the 255-byte name limit
+
+
+def shelve(root, fname, data):
+    """Save into the library unless the same file is already anywhere in it. Returns (path, duplicate)."""
+    for d, _, files in os.walk(root):
+        for f in files:
+            p = Path(d) / f
+            if f.lower().endswith(".epub") and p.stat().st_size == len(data) and p.read_bytes() == data:
+                return p, True
+    title, authors = epub_meta(data)
+    title = folder_name(title, folder_name(Path(fname).stem, "Untitled"))
+    folder = Path(root) / folder_name(", ".join(authors), "Unknown") / title
+    folder.mkdir(parents=True, exist_ok=True)
+    path, n = folder / f"{title}.epub", 0
+    while path.exists():
+        n += 1
+        path = folder / f"{title}_{n}.epub"
+    tmp = folder / f".{uuid.uuid4().hex}.part"   # hidden until complete, so a scan never sees half a file
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+    return path, False
 
 
 def qdir(device):
@@ -403,15 +453,15 @@ class Http(BaseHTTPRequestHandler):
         parts, q = self.route()
         if parts == ["health"]:
             return self.reply(200, {"ok": True})
-        if parts in ([], ["sync"], ["audio"]):
+        if parts in APP_PATHS:
             if parts == ["sync"]:
                 log.info("sync page: %d chars of text from %s", len(q.get("text", [""])[0]), self.client_address[0])
-            body = (PAGE if not parts else SYNC_PAGE).encode()
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(body)))
+            self.send_header("Content-Length", str(len(APP)))
+            self.send_header("Cache-Control", "no-cache")  # a home-screen web app picks up a new version at once
             self.end_headers()
-            self.wfile.write(body)
+            self.wfile.write(APP)
             return
         if parts == ["status"]:
             return self.reply(200, {
@@ -420,7 +470,8 @@ class Http(BaseHTTPRequestHandler):
                                 "jobs": [job_info(p) for p in queued(n)],
                                 "sent": [job_info(p) for p in sent(n)[:50]]}
                             for n, d in DEVICES.items()},
-                "history": list(history)})
+                "history": list(history),
+                "libraries": list(LIBRARIES)})
         if len(parts) == 3 and parts[0] == "jobs" and parts[1] in DEVICES:
             return self.reply(200, {"job": parts[2], "status": job_status(parts[1], parts[2])})
         if parts == ["audio", "books"]:
@@ -550,6 +601,8 @@ class Http(BaseHTTPRequestHandler):
 
     def do_PUT(self):
         parts, q = self.route()
+        if len(parts) == 3 and parts[0] == "library":
+            return self.put_library(parts[1], parts[2])
         if len(parts) != 3 or parts[0] != "send":
             return self.reply(404, {"error": "use PUT /send/<device>/<filename>"})
         device, fname = parts[1], parts[2]
@@ -568,6 +621,29 @@ class Http(BaseHTTPRequestHandler):
         while job_status(device, job) == "queued" and time.time() < deadline:
             time.sleep(0.5)
         self.reply(202, {"job": job, "device": device, "file": safe_name(fname), "status": job_status(device, job)})
+
+    # PUT /library/<library>/<filename>: file an EPUB into the Kavita library, then have Kavita scan it
+    def put_library(self, lib, fname):
+        if lib not in LIBRARIES:
+            return self.reply(404, {"error": f"unknown library {lib}", "libraries": list(LIBRARIES)})
+        size = int(self.headers.get("Content-Length") or -1)
+        if size < 0:
+            return self.reply(411, {"error": "Content-Length required"})
+        if size > MAX_BYTES:
+            return self.reply(413, {"error": "file too large"})
+        try:
+            path, dup = shelve(LIBRARIES[lib], safe_name(fname), self.rfile.read(size))
+        except ValueError as e:
+            return self.reply(400, {"error": str(e)})
+        r = {"file": str(path), "duplicate": dup, "scan": "skipped (Kavita not configured)"}
+        if not dup and textsync_ready():
+            try:
+                r["scan"] = "requested"
+                r["library"] = TEXTSYNC.kavita.scan_library(str(path))
+            except Exception as e:  # the file is saved; Kavita's own scan will still find it
+                r["scan"] = f"failed: {e}"
+        log.info("library: %s -> %s (%s, scan %s)", fname, path, "duplicate" if dup else "saved", r["scan"])
+        self.reply(200 if dup else 201, r)
 
     def log_message(self, fmt, *args):
         log.debug(fmt, *args)
